@@ -1,0 +1,17 @@
+echo "Сжатие VCF файла..." 
+bgzip -c /b/NGS/test_MFTI/resources_broad_hg38_v0_Homo_sapiens_assembly38.dbsnp138.vcf > /b/NGS/test_MFTI/homo_sapiens_assembly38.dbsnp138.vcf.gz
+
+echo "Создание индекса..."
+tabix -p vcf /b/NGS/test_MFTI/Homo_sapiens_assembly38.dbsnp138.vcf.gz
+
+echo "Фильтрация по региону и частоте..."
+bcftools view -r chr5:500000-1200000 /b/NGS/test_MFTI/Homo_sapiens_assembly38.dbsnp138.vcf.gz | \
+bcftools filter -i 'AF[0]>0.1' > filtered_by_af.vcf
+
+echo "Отбор вариантов с аллелем T..."
+bcftools view filtered_by_af.vcf | \
+awk -F'\t' '($5 == "T" || $5 ~ /T,|,T/)' > filtered_snps_with_T.vcf
+
+echo "Результат:"
+echo "Всего SNP с AF > 0.1: $(grep -vc '^#' filtered_by_af.vcf)"
+echo "Из них с аллелем T: $(grep -vc '^#' filtered_snps_with_T.vcf)"
