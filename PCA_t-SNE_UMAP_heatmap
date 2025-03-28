@@ -1,0 +1,243 @@
+# Установка пакетов
+if (!require("tidyverse")) install.packages("tidyverse")  # Включает ggplot2, dplyr, tidyr
+if (!require("Rtsne")) install.packages("Rtsne")
+if (!require("umap")) install.packages("umap")
+if (!require("factoextra")) install.packages("factoextra")
+if (!require("RcppZiggurat")) install.packages("RcppZiggurat")
+
+# Установка Bioconductor пакетов
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install(c("DESeq2", "pheatmap", "limma", "ALDEx2"))
+
+# Загрузка всех пакетов
+library(tidyverse)  # Включает ggplot2, dplyr, tidyr
+library(Rtsne)
+library(umap)
+library(factoextra)
+library(DESeq2)
+library(pheatmap)
+library(limma)
+library(ggplot2)
+library(dplyr)
+
+
+# Загрузка данных 
+data <- read.delim("B:/NGS/test_MFTI/TCGA-HNSC.star_fpkm-uq.tsv", row.names = 1)
+
+# Транспонируем (гены -> столбцы, образцы -> строки)
+data <- t(data)
+
+# Фильтрация: оставляем гены с высокой дисперсией (топ-500)
+gene_vars <- apply(data, 2, var)# вычисляет дисперсию (вариацию) экспрессии каждого гена по всем образцам в данных RNA-seq; 2- ось по столбцам, var - Функция, вычисляющая дисперсию 
+top_genes <- names(sort(gene_vars, decreasing = TRUE)[1:500])
+data_filtered <- data[, top_genes]
+
+#Нормализация (логарифмирование)
+data_log <- log2(data_filtered + 1)  # +1 чтобы избежать log(0)
+
+
+#########PCA######
+pca_result <- prcomp(data_log, scale. = TRUE)#  функция PCA (Principal Component Analysis).
+pca_df <- as.data.frame(pca_result$x[, 1:2])
+
+# Визуализация
+ggplot(pca_df, aes(x = PC1, y = PC2)) +
+  geom_point() +
+  labs(title = "PCA для TCGA-HNSC")
+
+#########t-SNE#####
+set.seed(42)  # Фиксирует начальное значение для генератора случайных чисел; 42- произвольное число стало традиционным в программировании.
+tsne_result <- Rtsne::Rtsne(data_log, perplexity = 30)
+tsne_df <- as.data.frame(tsne_result$Y)
+# Визуализация
+ggplot(tsne_df, aes(x = V1, y = V2)) +
+  geom_point() +
+  labs(
+    title = "t-SNE для TCGA-HNSC",
+    x = "t-SNE_1",
+    y = "t-SNE_2"
+  )
+
+##########UMAP####
+umap_result <- umap::umap(data_log)#
+umap_df <- as.data.frame(umap_result$layout)
+# Визуализация
+ggplot(umap_df, aes(x = V1, y = V2)) +
+  geom_point() +
+  labs(title = "UMAP для TCGA-HNSC",
+       x = "UMAP_1",
+       y = "UMAP_2"
+  )
+
+
+####Иерархическая кластеризация по исходным данным####
+dist_matrix <- dist(scale(data_log))  # Евклидово расстояние
+hc <- hclust(dist_matrix, method = "ward.D2")  # Метод Уорда
+
+#Определение кластеров 
+fviz_nbclust(data_log, hcut, method = "wss") + 
+  geom_vline(xintercept = 3, linetype = 2)
+
+umap_df$cluster <- as.factor(cutree(hc, k = 3))
+
+# Визуализация
+ggplot(umap_df, aes(x = V1, y = V2, color = cluster)) +
+  geom_point(size = 3, alpha = 0.7) +
+  labs(title = "Иерархическая кластеризация",
+       x = "UMAP1", y = "UMAP2") +
+  theme_minimal() +
+  scale_color_brewer(palette = "Set1")
+
+
+
+##################################  
+
+
+# Загрузка count данных
+counts_file <- "B:/NGS/test_MFTI/TCGA-HNSC.star_counts.tsv"
+count_data <- read.delim(counts_file, row.names = 1, check.names = FALSE)
+
+# Замена дефисов на точки в названиях образцов
+colnames(count_data) <- gsub("-", ".", colnames(count_data))
+
+# Подготовка данных
+# Выбираем только общие образцы
+samples <- intersect(colnames(count_data), rownames(umap_df))
+count_data <- count_data[, samples]
+umap_df <- umap_df[samples, , drop = FALSE]
+
+
+# Преобразуем кластеры в фактор
+groups <- factor(umap_df$cluster)
+levels(groups) <- paste0("cluster", levels(groups))  # Переименовываем уровни
+
+# Нормализация и преобразование данных
+# Логарифмирование (псевдо-count +1 чтобы избежать log(0))
+log_counts <- log2(count_data + 1)
+
+# Дифференциальный анализ экспрессии
+# Создаем design матрицу без intercept
+design <- model.matrix(~ 0 + groups)
+colnames(design) <- levels(groups)
+
+# Линейная модель
+fit <- lmFit(log_counts, design)
+
+
+# Задаем контрасты для всех попарных сравнений
+contrast.matrix <- makeContrasts(
+  cluster2_vs_1 = cluster2 - cluster1,
+  cluster3_vs_1 = cluster3 - cluster1,
+  cluster3_vs_2 = cluster3 - cluster2,
+  levels = design
+)
+
+# Анализ дифференциальной экспрессии
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+
+# Выбор топ-5 маркерных генов для каждого кластера
+get_top_markers <- function(fit_obj, cluster, n = 5) {
+  if (cluster == "cluster1") {
+    # Гены с высокой экспрессией в cluster1 vs остальным
+    res <- topTable(fit_obj, coef = c("cluster2_vs_1", "cluster3_vs_1"), 
+                    number = Inf, sort.by = "B")
+    res %>% 
+      filter(cluster2_vs_1 < 0 & cluster3_vs_1 < 0) %>% 
+      arrange(cluster2_vs_1 + cluster3_vs_1) %>% 
+      head(n) %>% 
+      rownames()
+  } else if (cluster == "cluster2") {
+    # Гены с высокой экспрессией в cluster2 vs остальным
+    res <- topTable(fit_obj, coef = c("cluster2_vs_1", "cluster3_vs_2"), 
+                    number = Inf, sort.by = "B")
+    res %>% 
+      filter(cluster2_vs_1 > 0 & cluster3_vs_2 < 0) %>% 
+      arrange(desc(cluster2_vs_1 - cluster3_vs_2)) %>% 
+      head(n) %>% 
+      rownames()
+  } else {
+    # Гены с высокой экспрессией в cluster3 vs остальным
+    res <- topTable(fit_obj, coef = c("cluster3_vs_1", "cluster3_vs_2"), 
+                    number = Inf, sort.by = "B")
+    res %>% 
+      filter(cluster3_vs_1 > 0 & cluster3_vs_2 > 0) %>% 
+      arrange(desc(cluster3_vs_1 + cluster3_vs_2)) %>% 
+      head(n) %>% 
+      rownames()
+  }
+}
+
+# Получаем топ-5 маркеров для каждого кластера
+top_markers <- unique(c(
+  get_top_markers(fit2, "cluster1"),
+  get_top_markers(fit2, "cluster2"),
+  get_top_markers(fit2, "cluster3")
+))
+
+# Подготовка данных для heatmap
+# Z-score нормализация по генам
+heatmap_data <- log_counts[top_markers, ]
+heatmap_data <- t(scale(t(heatmap_data)))
+
+# Сортируем образцы по кластерам
+sample_order <- order(umap_df$cluster)
+heatmap_data <- heatmap_data[, sample_order]
+
+# Создаем аннотацию для образцов
+annotation_col <- data.frame(
+  Cluster = factor(umap_df$cluster[sample_order])
+)
+rownames(annotation_col) <- colnames(heatmap_data)
+
+
+# Построение heatmap
+pheatmap(heatmap_data,
+         annotation_col = annotation_col,
+         cluster_cols = FALSE,  # Сохраняем порядок по кластерам
+         show_colnames = FALSE,  # Не показываем названия образцов
+         main = "Топ-5 маркерных генов для каждого кластера",
+         color = colorRampPalette(c("blue", "white", "red"))(50),
+         fontsize_row = 8,
+         gaps_col = cumsum(table(umap_df$cluster))[-length(table(umap_df$cluster))],
+         annotation_names_col = FALSE)
+
+
+
+
+# Сохранение результатов
+marker_genes <- data.frame(
+  Gene = top_markers,
+  Cluster = sapply(top_markers, function(gene) {
+    if (gene %in% get_top_markers(fit2, "cluster1")) "cluster1"
+    else if (gene %in% get_top_markers(fit2, "cluster2")) "cluster2"
+    else "cluster3"
+  })
+)
+
+write.csv(marker_genes, "top_marker_genes.csv", row.names = FALSE)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
