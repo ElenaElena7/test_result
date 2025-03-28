@@ -205,17 +205,6 @@ pheatmap(heatmap_data,
 
 
 
-# Сохранение результатов
-marker_genes <- data.frame(
-  Gene = top_markers,
-  Cluster = sapply(top_markers, function(gene) {
-    if (gene %in% get_top_markers(fit2, "cluster1")) "cluster1"
-    else if (gene %in% get_top_markers(fit2, "cluster2")) "cluster2"
-    else "cluster3"
-  })
-)
-
-write.csv(marker_genes, "top_marker_genes.csv", row.names = FALSE)
 
 
 
